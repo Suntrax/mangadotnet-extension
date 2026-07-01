@@ -1,0 +1,10 @@
+# Add project specific R8 rules here.
+
+# Keep the WebView JavascriptInterface bridge!
+# This prevents R8 from renaming or deleting the sendData() method.
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
+# Keep all classes in your package just to be safe
+-keep class com.blissless.oni_extension_template.** { *; }
