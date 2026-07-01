@@ -13,17 +13,16 @@ import org.json.JSONObject
 /**
  * ContentProvider queried by the MangaClient main app.
  *
- * Query URI:
+ * Query URI (chapter is REQUIRED):
  *   content://com.blissless.mangadotnet.provider/scrape
  *     ?manga=<title>&anilistId=<id>&chapter=<number-or-title>
  *
- * The `chapter` parameter is optional:
- *   - When absent/blank: returns the full chapter list (no images, fast):
- *       { "totalChapters": 105,
- *         "chapters": [ {"number":"1","title":"...","group":"..."}, ... ] }
- *   - When present: returns only the requested chapter with its image URLs:
- *       { "totalChapters": 105,
- *         "chapter": {"number":"38","title":"...","group":"...","images":[...]} }
+ * The extension fetches ONLY the requested chapter's image URLs and returns:
+ *   { "totalChapters": 105,
+ *     "chapter": {"number":"38","title":"...","group":"...","images":[...]} }
+ *
+ * If `chapter` is missing, the extension returns an error:
+ *   { "error": "No chapter provided. This extension requires a chapter ..." }
  *
  * Returns a single-row MatrixCursor whose "data" column holds the JSON string.
  */
