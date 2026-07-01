@@ -23,11 +23,11 @@ lists and per-chapter page image URLs from [mangadot.net](https://mangadot.net).
 ```json
 {
   "1": [
-    "https://mangadot.net/chapters/manga_68/chapter_1_g17425/001.webp",
-    "https://mangadot.net/chapters/manga_68/chapter_1_g17425/002.webp"
+    "https://mangadot.net/chapters/manga_68/chapter_1_[slug]/001.webp",
+    "https://mangadot.net/chapters/manga_68/chapter_1_[slug]/002.webp"
   ],
   "2": [
-    "https://mangadot.net/chapters/manga_68/chapter_2_g17425/001.webp"
+    "https://mangadot.net/chapters/manga_68/chapter_2_[slug]/001.webp"
   ]
 }
 ```
@@ -67,7 +67,7 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 | File | Purpose |
 |------|---------|
-| `MangadotnetScraper.kt` | All HTTP + JSON parsing logic, including the HMAC token flow for official chapters. |
+| `MangaDotNetScraper.kt` | All HTTP + JSON parsing logic, including the HMAC token flow for official chapters. |
 | `ScraperProvider.kt` | `ContentProvider` entry point; serializes the scraper result to JSON. Supports `Map<String, List<String>>` (chapter -> image URLs), `Map<String, Map<String,String>>` (episode -> quality -> URL), and flat `List<String>`. |
 | `ExtensionBeaconReceiver.kt` | Empty `BroadcastReceiver` so the Main App can discover the extension. |
 
@@ -80,6 +80,6 @@ under ~50KB after R8 shrinking.
 - The scraper is **synchronous** and called from a binder thread. The Main App
   is expected to call `query()` from a background coroutine.
 - `MAX_CHAPTERS = 100` caps the number of chapters per query to avoid runaway
-  HTTP. Edit the constant in `MangadotnetScraper.kt` if you need more.
+  HTTP. Edit the constant in `MangaDotNetScraper.kt` if you need more.
 - Chapter-image URLs are returned as **absolute** `https://mangadot.net/...`
   URLs so the Main App can load them directly.
