@@ -13,11 +13,11 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "com.blissless.oni_extension_template"
+    namespace = "com.blissless.mangadotnet"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.blissless.oni_extension_template"
+        applicationId = "com.blissless.mangadotnet"
         minSdk = 26
         targetSdk = 37
         versionCode = 1
@@ -25,11 +25,16 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            storeFile = file(keystoreProperties["storeFile"] as String)
-            storePassword = keystoreProperties["storePassword"] as String
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["keyPassword"] as String
+        // The release config is only created when local.properties defines
+        // storeFile/storePassword/keyAlias/keyPassword. Otherwise release builds
+        // fall back to the debug signing key (still installable for testing).
+        if (keystoreProperties.containsKey("storeFile")) {
+            create("release") {
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+            }
         }
     }
 
@@ -37,10 +42,12 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("release")
+            if (keystoreProperties.containsKey("storeFile")) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
-                "src/main/keepRules/rules.keep" // <--- ADDED THIS LINE!
+                "src/main/keepRules/rules.keep"
             )
         }
     }

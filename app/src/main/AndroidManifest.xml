@@ -6,12 +6,12 @@
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="Oni: TEMPLATE_NAME"
+        android:label="Oni: MangaDotNet"
         android:theme="@android:style/Theme.NoDisplay">
 
         <provider
             android:name=".ScraperProvider"
-            android:authorities="com.blissless.oni_extension_template.provider"
+            android:authorities="com.blissless.mangadotnet.provider"
             android:exported="true" />
 
         <receiver
