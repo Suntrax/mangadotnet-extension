@@ -6,9 +6,27 @@ import android.content.UriMatcher
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * ContentProvider queried by the MangaClient main app.
+ *
+ * Query URI:
+ *   content://com.blissless.mangadotnet.provider/scrape
+ *     ?manga=<title>&anilistId=<id>&chapter=<number-or-title>
+ *
+ * The `chapter` parameter is optional:
+ *   - When absent/blank: returns the full chapter list (no images, fast):
+ *       { "totalChapters": 105,
+ *         "chapters": [ {"number":"1","title":"...","group":"..."}, ... ] }
+ *   - When present: returns only the requested chapter with its image URLs:
+ *       { "totalChapters": 105,
+ *         "chapter": {"number":"38","title":"...","group":"...","images":[...]} }
+ *
+ * Returns a single-row MatrixCursor whose "data" column holds the JSON string.
+ */
 class ScraperProvider : ContentProvider() {
 
     companion object {
@@ -16,6 +34,8 @@ class ScraperProvider : ContentProvider() {
         const val PATH_SCRAPE = "scrape"
         val CONTENT_URI: Uri = Uri.parse("content://$AUTHORITY/$PATH_SCRAPE")
         private const val CODE_SCRAPES = 1
+
+        private const val TAG = "MangaDotNet"
     }
 
     private val uriMatcher = UriMatcher(UriMatcher.NO_MATCH).apply {
@@ -32,28 +52,39 @@ class ScraperProvider : ContentProvider() {
             CODE_SCRAPES -> {
                 val mangaName = uri.getQueryParameter("manga")
                 val anilistId = uri.getQueryParameter("anilistId")
+                val chapter   = uri.getQueryParameter("chapter")
                 val cursor = MatrixCursor(arrayOf("data"))
 
-                try {
-                    val result = MangadotnetScraper.scrape(context!!, mangaName, anilistId)
+                Log.d(TAG, "scrape called: manga='$mangaName'  " +
+                        "anilistId=$anilistId  chapter='$chapter'")
 
+                try {
+                    val result = MangadotnetScraper.scrape(
+                        context!!, mangaName, anilistId, chapter
+                    )
                     val json = serializeResult(result)
+                    Log.d(TAG, "scrape result (${json.length} chars): " +
+                            json.take(300) +
+                            if (json.length > 300) "..." else "")
                     cursor.addRow(arrayOf(json))
                 } catch (e: Exception) {
-                    cursor.addRow(arrayOf("{\"error\":\"Scraping failed: ${e.message?.replace("\"", "\\\"")}\"}"))
+                    Log.e(TAG, "scrape threw", e)
+                    cursor.addRow(arrayOf(
+                        "{\"error\":\"Scraping failed: " +
+                                "${e.message?.replace("\"", "\\\"")}\"}"
+                    ))
                 }
                 return cursor
             }
         }
+        Log.w(TAG, "URI did not match: $uri")
         return null
     }
 
     /**
      * Serializes the scraper result to JSON. Supports:
-     *   - Map<String, List<*>>      -> {"key": [...], ...}   (chapter -> image urls)
-     *   - Map<String, Map<String,*>>-> {"key": {...}, ...}   (episode -> quality -> url)
-     *   - Map<String, String>       -> {"key": "...", ...}   (error object)
-     *   - List<*>                   -> ["...", "..."]        (flat list)
+     *   - Map<String, *>  -> {"key": value, ...}  (totalChapters/chapters/chapter/error)
+     *   - List<*>         -> ["...", "..."]       (flat list — legacy)
      */
     private fun serializeResult(result: Any): String {
         return when (result) {
@@ -67,6 +98,8 @@ class ScraperProvider : ContentProvider() {
                             for (item in value) arr.put(item)
                             obj.put(key.toString(), arr)
                         }
+                        is JSONArray -> obj.put(key.toString(), value)
+                        is JSONObject -> obj.put(key.toString(), value)
                         null -> obj.put(key.toString(), JSONObject.NULL)
                         else -> obj.put(key.toString(), value)
                     }

@@ -12,18 +12,41 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Mangadot.net scraper for the Oni manga client.
+ * Mangadot.net scraper for the MangaClient manga client.
  *
  * Flow:
  *   1. GET /api/search?search=<manga>            -> pick best match (top hit)
- *   2. GET /api/manga/{id}/chapters/list         -> all chapters
- *   3. For each chapter, fetch its image manifest:
- *        - source=user    -> GET /api/uploads/{id}/images   (no token)
- *        - source=official -> GET /api/chapters/{id}/images (HMAC-signed)
+ *   2. GET /api/manga/{id}/chapters/list         -> all chapters (metadata only)
+ *   3a. If `chapter` is null/blank:
+ *         Return immediately with { totalChapters, chapters:[{number,title,group}] }
+ *         — no image fetching, fast.
+ *   3b. If `chapter` is set:
+ *         Find the matching chapter, fetch ONLY its image manifest:
+ *           - source=user     -> GET /api/uploads/{id}/images   (no token)
+ *           - source=official -> GET /api/chapters/{id}/images  (HMAC-signed)
+ *         Return { totalChapters, chapter:{number,title,group,images:[...]} }
  *
- * Returns a Map<String, List<String>>:
- *   { "1": ["https://mangadot.net/chapters/.../001.webp", ...],
- *     "2": [...], ... }
+ * Two response shapes:
+ *
+ *   Chapter list (no chapter param):
+ *     { "totalChapters": 105,
+ *       "chapters": [
+ *         { "number": "1", "title": "...", "group": "Asura Scans" },
+ *         { "number": "2", "title": "...", "group": "Asura Scans" },
+ *         ... ] }
+ *
+ *   Single chapter (chapter param set):
+ *     { "totalChapters": 105,
+ *       "chapter": {
+ *         "number": "38",
+ *         "title": "Episode 38",
+ *         "group": "Asura Scans",
+ *         "images": ["https://mangadot.net/chapters/.../001.webp", ...]
+ *       } }
+ *
+ *   Error:
+ *     { "error": "..." }
+ *     (often paired with totalChapters so the UI can still show the range)
  *
  * Chapter key = chapter number (normalized: "1" instead of "1.0").
  * When multiple versions of the same chapter number exist (different scanlation
@@ -33,15 +56,27 @@ object MangadotnetScraper {
 
     private const val BASE = "https://mangadot.net"
 
-    /** Cap the number of chapters we'll fetch images for, to avoid runaway HTTP. */
-    private const val MAX_CHAPTERS = 100
-
     private const val UA =
         "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
 
-    /** Return either a Map<String, List<String>> (chapter -> image urls) OR a Map<String,String> error. */
-    fun scrape(context: Context, mangaName: String?, anilistId: String?): Any {
+    /**
+     * @param context    Application context (unused for HTTP; kept for parity).
+     * @param mangaName  Manga title to search for.
+     * @param anilistId  AniList ID (unused by mangadot.net, but available).
+     * @param chapter    Optional chapter number (as a string — supports "1",
+     *                   "1.5", "12v2", or even a title). When null/blank,
+     *                   the scraper returns the chapter list only (no images).
+     *                   When set, the scraper fetches only that chapter's
+     *                   images.
+     * @return A Map serializable to JSON. See class KDoc for shapes.
+     */
+    fun scrape(
+        context: Context,
+        mangaName: String?,
+        anilistId: String?,
+        chapter: String? = null
+    ): Any {
         if (mangaName.isNullOrBlank()) {
             return mapOf("error" to "No manga name provided.")
         }
@@ -57,47 +92,137 @@ object MangadotnetScraper {
         }
         val mangaId = manga.getInt("id")
 
-        // 2. List chapters.
+        // 2. List chapters (metadata only — no image fetching yet).
         val chapters = try {
             listChapters(mangaId)
         } catch (e: Exception) {
             return mapOf("error" to "Failed to list chapters: ${e.message}")
         }
+        val totalChapters = chapters.length()
 
-        // 3. For each chapter, fetch images.
-        val result = LinkedHashMap<String, List<String>>()
-        val usedKeys = HashSet<String>()
-
-        var processed = 0
-        for (i in 0 until chapters.length()) {
-            if (processed >= MAX_CHAPTERS) break
-            val ch = chapters.optJSONObject(i) ?: continue
-
-            val chapterId = ch.optInt("id", -1)
-            if (chapterId <= 0) continue
-
-            val source = ch.optString("source", "user")
-            val groupName = ch.optString("group_name", "").ifBlank { ch.optString("scanlator_name", "") }
-
-            val images = try {
-                if (source == "user") {
-                    fetchUserChapterImages(chapterId)
-                } else {
-                    fetchOfficialChapterImages(chapterId)
-                }
-            } catch (e: Exception) {
-                // Skip chapters that fail; don't abort the whole batch.
-                continue
-            }
-            if (images.isEmpty()) continue
-
-            val key = buildChapterKey(ch, groupName, usedKeys)
-            result[key] = images
-            usedKeys.add(key)
-            processed++
+        // 3a. No specific chapter requested — return the chapter list only.
+        //     This is the fast path: one search + one chapters/list call.
+        if (chapter.isNullOrBlank()) {
+            return mapOf(
+                "totalChapters" to totalChapters,
+                "chapters" to buildChapterList(chapters)
+            )
         }
 
-        return result
+        // 3b. A specific chapter was requested — find it and fetch its images.
+        val match = findChapter(chapters, chapter.trim())
+        if (match == null) {
+            return mapOf(
+                "totalChapters" to totalChapters,
+                "error" to "Chapter '$chapter' not found. " +
+                        "Available range: 1–$totalChapters."
+            )
+        }
+
+        val chapterId = match.optInt("id", -1)
+        if (chapterId <= 0) {
+            return mapOf(
+                "totalChapters" to totalChapters,
+                "error" to "Matched chapter has invalid id."
+            )
+        }
+
+        val source = match.optString("source", "user")
+        val groupName = match.optString("group_name", "")
+            .ifBlank { match.optString("scanlator_name", "") }
+
+        val images = try {
+            if (source == "user") {
+                fetchUserChapterImages(chapterId)
+            } else {
+                fetchOfficialChapterImages(chapterId)
+            }
+        } catch (e: Exception) {
+            return mapOf(
+                "totalChapters" to totalChapters,
+                "error" to "Failed to fetch chapter $chapter images: ${e.message}"
+            )
+        }
+
+        if (images.isEmpty()) {
+            return mapOf(
+                "totalChapters" to totalChapters,
+                "error" to "Chapter $chapter returned no images."
+            )
+        }
+
+        val chapterObj = JSONObject()
+        chapterObj.put("number", chapter.trim())
+        chapterObj.put("title", match.optString("title", ""))
+        chapterObj.put("group", groupName)
+        chapterObj.put("images", JSONArray(images))
+
+        return mapOf(
+            "totalChapters" to totalChapters,
+            "chapter" to chapterObj
+        )
+    }
+
+    // ---------- Chapter list / matching ----------
+
+    /**
+     * Build a lightweight chapter list (number, title, group) — no image URLs.
+     * Used in the no-chapter path so the main app can render a picker UI
+     * without paying the cost of fetching every chapter's image manifest.
+     */
+    private fun buildChapterList(chapters: JSONArray): JSONArray {
+        val out = JSONArray()
+        val usedKeys = HashSet<String>()
+        for (i in 0 until chapters.length()) {
+            val ch = chapters.optJSONObject(i) ?: continue
+            val groupName = ch.optString("group_name", "")
+                .ifBlank { ch.optString("scanlator_name", "") }
+            val key = buildChapterKey(ch, groupName, usedKeys)
+            usedKeys.add(key)
+
+            val entry = JSONObject()
+            entry.put("number", key)
+            entry.put("title", ch.optString("title", ""))
+            entry.put("group", groupName)
+            out.put(entry)
+        }
+        return out
+    }
+
+    /**
+     * Find the first chapter whose normalized number matches [requested],
+     * falling back to a case-insensitive title match.
+     */
+    private fun findChapter(chapters: JSONArray, requested: String): JSONObject? {
+        val requestedNorm = requested.trim()
+
+        // Pass 1: exact match on chapter_number.
+        for (i in 0 until chapters.length()) {
+            val ch = chapters.optJSONObject(i) ?: continue
+            val numStr = normalizeChapterNumber(ch)
+            if (numStr == requestedNorm) return ch
+        }
+
+        // Pass 2: case-insensitive title match.
+        for (i in 0 until chapters.length()) {
+            val ch = chapters.optJSONObject(i) ?: continue
+            val title = ch.optString("title", "")
+            if (title.equals(requestedNorm, ignoreCase = true)) return ch
+        }
+
+        // Pass 3: numeric prefix match — "1" matches "1" but also "1.5"
+        // when the user requested "1" and there's no exact "1" (edge case
+        // for manga with only decimal-numbered chapters).
+        val requestedNum = requestedNorm.toDoubleOrNull()
+        if (requestedNum != null) {
+            for (i in 0 until chapters.length()) {
+                val ch = chapters.optJSONObject(i) ?: continue
+                val raw = ch.opt("chapter_number")
+                if (raw is Number && raw.toDouble() == requestedNum) return ch
+            }
+        }
+
+        return null
     }
 
     // ---------- API helpers ----------
@@ -172,10 +297,9 @@ object MangadotnetScraper {
         return out
     }
 
-    private fun buildChapterKey(ch: JSONObject, groupName: String, used: HashSet<String>): String {
-        // chapter_number may come back as int (0,1,2) or float (1.5).
+    private fun normalizeChapterNumber(ch: JSONObject): String {
         val raw = ch.opt("chapter_number")
-        val numStr = when (raw) {
+        return when (raw) {
             null -> ch.optInt("id").toString()
             is Number -> {
                 val d = raw.toDouble()
@@ -184,6 +308,10 @@ object MangadotnetScraper {
             }
             else -> raw.toString()
         }
+    }
+
+    private fun buildChapterKey(ch: JSONObject, groupName: String, used: HashSet<String>): String {
+        val numStr = normalizeChapterNumber(ch)
 
         // First try the bare number.
         if (!used.contains(numStr)) return numStr
